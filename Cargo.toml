@@ -1,7 +1,15 @@
+[workspace]
+members = [".", "tides"]
+# The Android crate has an Android-only toolchain (cargo-ndk + NDK
+# linker) and its own feature-flag story for galileo/eframe. Excluding
+# it here keeps `cargo check --workspace` on a dev laptop from trying
+# to resolve `android_activity` against a host target it can't link.
+exclude = ["android"]
+
 [package]
-edition = "2021"
+edition = "2024"
 name = "kayaknav"
-version = "0.1.0"
+version = "0.2.0"
 license = "AGPL-3.0-or-later"
 
 [profile.release]
@@ -26,58 +34,81 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 anyhow = "1.0.86"
-# backon = "0.4.4"
 bitflags = "2.6.0"
 chrono = "0.4.38"
-egui = "0.27.2"
-egui_extras = "0.27.2"
-egui-wgpu = "0.27.2"
+# Note: per-target eframe feature additions are below (`persistence` for
+# non-Android, `android-native-activity` for Android). Cargo unions
+# features across matching dep declarations in different target sections.
+eframe = { version = "0.34", default-features = false, features = ["default_fonts", "wgpu"] }
+egui = "0.34"
+egui_extras = "0.34"
 env_logger = { version = "0.11.3", default-features = false }
-fallible-iterator = "0.3.0"
 futures = "0.3.30"
-galileo = { git = "https://github.com/Maximkaaa/galileo.git" }
-#galileo = { path = "../galileo/galileo" }
-galileo-types = { git = "https://github.com/Maximkaaa/galileo.git" }
-#galileo-types = { path = "../galileo/galileo-types" }
+galileo = { git = "https://github.com/nicolasavru/galileo.git", branch = "fixes", default-features = false, features = ["wgpu", "winit", "rustybuzz", "image", "fontconfig-dlopen"] }
+galileo-egui = { git = "https://github.com/nicolasavru/galileo.git", branch = "fixes", default-features = false, features = ["init"] }
+galileo-types = { git = "https://github.com/nicolasavru/galileo.git", branch = "fixes" }
 itertools = "0.13.0"
 jord = "0.14.0"
+log = "0.4"
 lru = "0.12.3"
 num-traits = "0.2.17"
 once_cell = "1.19.0"
 ordered-float = "4.2.0"
+parking_lot = "0.12"
 polars = { version = "0.40.0", default-features = false, features = ["abs", "dtype-struct", "interpolate", "lazy", "round_series", "temporal"] }
-reqwest = "0.12.5"
+reqwest = { version = "0.12.5", default-features = false, features = ["rustls-tls"] }
 rstar = "0.12.0"
-serde = "1.0.203"
+serde = { version = "1.0.203", features = ["derive"] }
 serde_json = "1.0.117"
+# Sunset/sunrise calculation for the trip-planner's
+# "arrive before sunset" filter and the UI's sunset readout. The
+# sunrise crate is ~400 lines, no_std-friendly, and depends only on
+# chrono for its date types — a light addition given we already have
+# chrono in the graph.
+sunrise = "3.0.0"
+noaa_tides = { path = "tides" }
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 uom = "0.36.0"
-wgpu = { version = "0.19.4", default-features = false }
-winit = { version = "0.29.15", default-features = false }
 urlencoding = "2.1.3"
+web-time = "1.1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-egui-winit = { version = "0.27.2", default-features = false, features = ["links"] }
 js-sys = "0.3.69"
 tracing = { version = "0.1.40", features = ["max_level_warn",
                                             "release_max_level_warn"] }
-log = { version = "0.4.22", features = ["max_level_warn",
-                                        "release_max_level_warn"] }
 tracing-web = "0.1.3"
 wasm-bindgen = "0.2.92"
 wasm-bindgen-futures = "0.4.42"
-web-sys = "0.3.69"
+web-sys = { version = "0.3.69", features = ["Window"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-egui-winit = "0.27.2"
 bpaf = "0.9.12"
 tokio = { version = "1.38.0", default-features = false, features = ["full"] }
 tracing = "0.1.40"
-http-cache-reqwest = "0.14.0"
+http-cache-reqwest = "0.14"
 reqwest-middleware = "0.3.1"
 reqwest-retry = "0.6.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.http-cache]
-version = "*"
+version = "0.18"
 default-features = false
 features = ["manager-cacache", "cacache-tokio"]
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+# `persistence` pulls in the `home` crate to locate a persistence dir
+# for egui window state. On Android the storage path comes from
+# `AndroidApp::internal_data_path()` and egui handles it via the
+# android-native-activity path instead — so we skip `persistence` there
+# to avoid dragging in `home` (which has no clean Android story).
+eframe = { version = "0.34", default-features = false, features = ["persistence"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# `android-native-activity` toggles `egui-winit/android-native-activity`
+# inside eframe, which is what lets winit's Android backend come alive.
+# Without it, eframe compiles but the event loop has no Android wiring
+# and `with_android_app` panics at runtime. Cargo's feature unification
+# propagates this onto winit itself across the whole dep graph, so we
+# don't need a separate direct `winit` dep just to get the Android
+# platform bits compiled in.
+eframe = { version = "0.34", default-features = false, features = ["android-native-activity"] }
+android-activity = { version = "0.6", features = ["native-activity"] }

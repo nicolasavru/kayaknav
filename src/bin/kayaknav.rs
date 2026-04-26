@@ -1,8 +1,9 @@
+use std::path::PathBuf;
+
 use bpaf::Parser;
-use kayaknav::run;
 use kayaknav::Config;
-use winit::event_loop::EventLoop;
-use winit::window::WindowBuilder;
+use kayaknav::launch;
+use kayaknav::setup;
 
 fn parse_args() -> Config {
     let default_config = Config::default();
@@ -19,22 +20,33 @@ fn parse_args() -> Config {
         .fallback(default_config.api_proxy_url)
         .display_fallback();
 
+    // `display_fallback` would show the default in the `--help` text, but
+    // bpaf requires `Display` on the fallback value and `PathBuf` only
+    // implements `Debug`. Silent fallback is fine here — the help text
+    // spells the default out.
+    let tile_cache_dir = bpaf::long("tile-cache-dir")
+        .help("Directory to use for the raster tile cache. Defaults to a CWD-relative `.tile_cache`; pass an absolute path if launching from an unusual directory.")
+        .argument::<PathBuf>("PATH")
+        .fallback(default_config.tile_cache_dir);
+
     bpaf::construct!(Config {
         use_api_proxy,
-        api_proxy_url
+        api_proxy_url,
+        tile_cache_dir,
     })
     .to_options()
     .run()
 }
 
-#[tokio::main]
-async fn main() {
-    let config = parse_args();
-    let event_loop = EventLoop::new().unwrap();
-    let window = WindowBuilder::new()
-        .with_title("KayakNav")
-        .build(&event_loop)
-        .unwrap();
+fn main() -> eframe::Result {
+    env_logger::init();
 
-    run(window, event_loop, config).await;
+    let config = parse_args();
+
+    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+    let bundle = rt
+        .block_on(setup::build(config))
+        .expect("failed to set up app");
+
+    launch(bundle)
 }

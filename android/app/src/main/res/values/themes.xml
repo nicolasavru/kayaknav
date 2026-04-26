@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Custom theme for the NativeActivity. The legacy
+        @android:style/Theme.NoTitleBar inherits from Theme.Dark, which
+        on modern Android (12+) still ignores `fitsSystemWindows` and
+        runs the surface edge-to-edge, leaving content under both the
+        status bar and the navigation bar.
+
+        Theme.Material.NoActionBar honors `fitsSystemWindows`: when true,
+        the framework inserts padding insets on the root NativeContentView
+        so the EGL/Vulkan surface winit sees is the area between the
+        status bar and the nav bar. No Rust-side inset plumbing required.
+
+        `windowDrawsSystemBarBackgrounds` lets the system bars pick a
+        color consistent with the theme (dark text on light bar, etc.)
+        rather than falling back to a translucent overlay.
+    -->
+    <style name="Theme.KayakNav" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:fitsSystemWindows">true</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+    </style>
+</resources>

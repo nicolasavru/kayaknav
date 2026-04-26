@@ -20,7 +20,7 @@ warn = [
   "clippy::redundant_closure_for_method_calls",
   "clippy::ref_patterns",
   "clippy::rest_pat_in_fully_bound_structs",
-  "clippy::string_to_string",
+  "clippy::implicit_clone",
   "clippy::tests_outside_test_module",
   "clippy::trait_duplication_in_bounds",
   "clippy::type_repetition_in_bounds",
@@ -32,7 +32,6 @@ warn = [
   "clippy::used_underscore_binding",
   "clippy::verbose_file_reads",
   "clippy::wildcard_imports",
-  "unsafe_op_in_unsafe_fn",
 ]
 
 allow = [
@@ -42,4 +41,6 @@ allow = [
   "clippy::println_empty_string",
   "clippy::too_many_arguments",
   "clippy::type_complexity",
+  # Comes up in compile-time assertions using e.g., utils::AssertN.
+  "clippy::let_unit_value",
 ]

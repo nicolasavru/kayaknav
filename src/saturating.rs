@@ -67,9 +67,7 @@ impl<N: Saturatingable> Saturating<N> {
 
     pub fn set(&mut self, val: N) -> bool {
         let old_val = self.val;
-        self.val = val;
-        self.val = self.val.clamp(self.lower_bound, self.upper_bound);
-
+        self.val = val.clamp(self.lower_bound, self.upper_bound);
         self.val != old_val
     }
 
@@ -92,38 +90,32 @@ impl<N: Saturatingable> Saturating<N> {
     }
 }
 
-impl<N: Saturatingable> Add<N> for Saturating<N> {
-    type Output = Self;
-
-    fn add(self, other: N) -> Self {
-        Self {
-            val: (self.val + other).clamp(self.lower_bound, self.upper_bound),
-            lower_bound: self.lower_bound,
-            upper_bound: self.upper_bound,
-        }
+impl<N: Saturatingable> AddAssign<N> for Saturating<N> {
+    fn add_assign(&mut self, other: N) {
+        self.val = (self.val + other).clamp(self.lower_bound, self.upper_bound);
     }
 }
 
-impl<N: Saturatingable> AddAssign<N> for Saturating<N> {
-    fn add_assign(&mut self, other: N) {
-        self.val = self.val + other;
+impl<N: Saturatingable> Add<N> for Saturating<N> {
+    type Output = Self;
+
+    fn add(mut self, other: N) -> Self {
+        self += other;
+        self
+    }
+}
+
+impl<N: Saturatingable> SubAssign<N> for Saturating<N> {
+    fn sub_assign(&mut self, other: N) {
+        self.val = (self.val - other).clamp(self.lower_bound, self.upper_bound);
     }
 }
 
 impl<N: Saturatingable> Sub<N> for Saturating<N> {
     type Output = Self;
 
-    fn sub(self, other: N) -> Self {
-        Self {
-            val: (self.val - other).clamp(self.lower_bound, self.upper_bound),
-            lower_bound: self.lower_bound,
-            upper_bound: self.upper_bound,
-        }
-    }
-}
-
-impl<N: Saturatingable> SubAssign<N> for Saturating<N> {
-    fn sub_assign(&mut self, other: N) {
-        self.val = self.val - other
+    fn sub(mut self, other: N) -> Self {
+        self -= other;
+        self
     }
 }

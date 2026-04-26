@@ -1,0 +1,58 @@
+# Opt this crate out of the parent workspace by declaring its own
+# `[workspace]` table. The parent already lists us under `exclude`, but
+# cargo still complains in some cases — an explicit empty workspace
+# table makes this file unambiguously a workspace root.
+[workspace]
+
+[package]
+name = "kayaknav_android"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+# Android packages the Rust code as a shared library (libkayaknav_android.so)
+# that the NativeActivity class loads at runtime. `cdylib` is what produces
+# the .so; `rlib` is kept so this crate's tests — if any — can run on the
+# host even though the APK only uses the cdylib.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# All the heavyweight Android-platform deps (ndk-sys etc. through
+# android-activity and eframe, plus kayaknav pulling galileo, polars,
+# etc.) refuse to build on non-Android targets. Scoping them here means
+# a host-side `cargo check` sees an essentially empty crate (lib.rs is
+# gated by `#![cfg(target_os = "android")]`) and succeeds instantly,
+# so the file still participates in "does this parse?" checks without
+# requiring the NDK.
+[target.'cfg(target_os = "android")'.dependencies]
+# The main kayaknav crate — provides `launch_android`, `setup::build`,
+# `Config`, and everything else the desktop/wasm targets use. Pulling
+# it in transitively gives us galileo (wgpu+rustybuzz, no fontconfig),
+# eframe, winit, egui, and polars. Earlier iterations of this file
+# declared those directly; they're all redundant once kayaknav itself
+# is imported.
+kayaknav = { path = ".." }
+
+# Android platform glue. `native-activity` uses the built-in Android
+# NativeActivity class, so no Java/Kotlin shim is required for the
+# APK — the manifest points directly at the .so. The alternative
+# (`game-activity`) gives better input handling but requires a small
+# Kotlin file; worth swapping in later if soft-keyboard/IME support
+# becomes a priority.
+android-activity = { version = "0.6", features = ["native-activity"] }
+
+# Logging bridge: `log` calls from Rust (and eframe/wgpu internally) are
+# routed to Android logcat via `android_logger::init_once`.
+log = "0.4"
+android_logger = "0.13"
+
+# `setup::build` is async; the Android entry point needs to drive it to
+# completion before handing off to the eframe event loop. Android gives
+# us real threads, so `block_on` is fine — no need for a tokio runtime
+# just to await a single top-level future.
+futures = "0.3"

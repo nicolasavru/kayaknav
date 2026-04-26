@@ -1,83 +1,44 @@
-use std::io;
-use std::panic;
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use tracing_subscriber::filter::LevelFilter;
-use tracing_subscriber::fmt::format::FmtSpan;
-use tracing_subscriber::fmt::format::Pretty;
-use tracing_subscriber::prelude::*;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::Layer;
-#[cfg(target_arch = "wasm32")]
-use tracing_web::performance_layer;
-#[cfg(target_arch = "wasm32")]
-use tracing_web::MakeWebConsoleWriter;
-#[cfg(target_arch = "wasm32")]
-use winit::dpi::PhysicalSize;
-use winit::event::Event;
-use winit::event::KeyEvent;
-use winit::event::WindowEvent;
-use winit::event_loop::ControlFlow;
-use winit::event_loop::EventLoop;
-#[cfg(target_arch = "wasm32")]
-use winit::platform::web::WindowExtWebSys;
-use winit::window::Window;
-#[cfg(target_arch = "wasm32")]
-use winit::window::WindowBuilder;
+#[cfg(not(target_os = "android"))]
+use galileo_egui::InitBuilder;
+use parking_lot::RwLock;
 
+pub mod app;
 mod error_utils;
 mod features;
-mod http;
-mod noaa;
+pub mod noaa;
 pub mod prelude;
 mod run_ui;
 mod saturating;
 pub mod scheduling;
-pub mod state;
+pub mod setup;
+pub mod sun;
 
-use crate::state::State;
-
-#[cfg(target_arch = "wasm32")]
-pub mod html_panic_hook;
-
-fn configure_tracing() {
-    let mut layers = Vec::new();
-
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let layer = tracing_subscriber::fmt::layer()
-            .with_writer(io::stderr)
-            .with_thread_ids(true)
-            .with_file(true)
-            .with_line_number(true)
-            .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
-            .with_filter(EnvFilter::from_default_env());
-
-        layers.push(layer.boxed());
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    {
-        let fmt_layer = tracing_subscriber::fmt::layer()
-            .with_ansi(false) // Only partially supported across browsers
-            .without_time()   // std::time is not available in browsers
-            .with_level(false)
-            .with_writer(MakeWebConsoleWriter::new()
-                         .with_pretty_level())
-            .with_filter(LevelFilter::WARN);
-        layers.push(fmt_layer.boxed());
-
-        let perf_layer = performance_layer().with_details_from_fields(Pretty::default());
-        layers.push(perf_layer.boxed());
-    }
-
-    tracing_subscriber::registry().with(layers).init();
-}
+use crate::app::App;
+use crate::app::make_waypoint_handler;
+use crate::run_ui::UiState;
+/// Re-export for CLI/external callers that want to toggle Trip's
+/// weekday filter without reaching into the UI-internal `run_ui`
+/// module. The bitflags type itself has no UI dependencies — it's the
+/// surrounding egui widgets in `run_ui` that do — so re-exporting the
+/// type alone keeps the contamination contained.
+pub use crate::run_ui::WeekdayFlags;
+use crate::setup::SetupBundle;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Config {
     pub use_api_proxy: bool,
     pub api_proxy_url: String,
+    /// Directory for the raster tile cache. The default `.tile_cache`
+    /// is CWD-relative and works for desktop/CLI usage launched from
+    /// the repo root. Android callers MUST override this with an
+    /// absolute path (typically `AndroidApp::internal_data_path().join(...)`) —
+    /// Android processes run with `/` as CWD and no write access to it.
+    /// On wasm this is ignored: `with_file_cache_checked` is a no-op
+    /// under wasm32.
+    pub tile_cache_dir: PathBuf,
 }
 
 impl Default for Config {
@@ -85,110 +46,164 @@ impl Default for Config {
         Self {
             use_api_proxy: false,
             api_proxy_url: "https://kayaknav.com/proxy".to_string(),
+            tile_cache_dir: PathBuf::from(".tile_cache"),
         }
     }
 }
 
-pub async fn run(window: Window, event_loop: EventLoop<()>, config: Config) {
+// Desktop + wasm entry point. On Android we use `launch_android`
+// instead (which threads an `AndroidApp` handle into App for safe-area
+// inset queries); this function has no way to construct that handle, so
+// it's cfg-gated out of the Android target to avoid an E0063 "missing
+// field `android_app`" error when the App struct grows an Android-only
+// field.
+#[cfg(not(target_os = "android"))]
+pub fn launch(bundle: SetupBundle) -> eframe::Result {
+    let SetupBundle {
+        map,
+        trip,
+        time_idx,
+        battery_tide_predictions,
+        waypoint_mode,
+        current_prediction_layer,
+        load_progress,
+        harcon_bytes,
+        pending_center,
+        repaint,
+        pending_merges,
+    } = bundle;
+
+    let last_pointer_position = Arc::new(RwLock::new(None));
+    let handler = make_waypoint_handler(
+        trip.clone(),
+        waypoint_mode.clone(),
+        last_pointer_position.clone(),
+    );
+
+    let ui_state = UiState::new(
+        time_idx,
+        battery_tide_predictions,
+        waypoint_mode,
+        trip,
+        current_prediction_layer,
+        load_progress,
+        harcon_bytes,
+        pending_merges,
+    );
+
+    let mut builder = InitBuilder::new(map)
+        .with_handlers([handler])
+        .with_logging(false)
+        .with_app_builder(move |map_state, _cc| {
+            Box::new(App {
+                map_state,
+                ui_state,
+                last_pointer_position,
+                pending_center,
+                repaint,
+            })
+        });
+
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+    {
+        builder = builder.with_app_name("KayakNav");
+    }
+
     #[cfg(target_arch = "wasm32")]
-    panic::set_hook(Box::new(html_panic_hook::hook));
+    {
+        builder = builder.with_canvas_id("the_canvas_id");
+    }
 
-    configure_tracing();
+    builder.init()
+}
 
-    let window = Arc::new(window);
+/// Android entry point. Same plumbing as [`launch`] but with the
+/// `AndroidApp` handle threaded into winit via `event_loop_builder`,
+/// and the `Wgpu` renderer forced (eframe's default `Glow` backend has
+/// no Android wiring in the current release).
+///
+/// Mirrors the per-feature structure of `launch` intentionally — the
+/// full UI (map, trip table, waypoint clicks) is the same on Android
+/// as on desktop; only the platform hook-up differs. If the Android UI
+/// eventually needs a different layout (e.g. collapsible panels for
+/// small screens), branch inside `App::update`, not here.
+#[cfg(target_os = "android")]
+pub fn launch_android(
+    bundle: SetupBundle,
+    android_app: android_activity::AndroidApp,
+) -> eframe::Result {
+    let SetupBundle {
+        map,
+        trip,
+        time_idx,
+        battery_tide_predictions,
+        waypoint_mode,
+        current_prediction_layer,
+        load_progress,
+        harcon_bytes,
+        pending_center,
+        repaint,
+        pending_merges,
+    } = bundle;
 
-    let mut state = State::new(Arc::clone(&window), config).await.unwrap();
+    let last_pointer_position = Arc::new(RwLock::new(None));
+    let handler = make_waypoint_handler(
+        trip.clone(),
+        waypoint_mode.clone(),
+        last_pointer_position.clone(),
+    );
 
-    let _ = event_loop.run(move |event, ewlt| {
-        ewlt.set_control_flow(ControlFlow::Wait);
+    let ui_state = UiState::new(
+        time_idx,
+        battery_tide_predictions,
+        waypoint_mode,
+        trip,
+        current_prediction_layer,
+        load_progress,
+        harcon_bytes,
+        pending_merges,
+    );
 
-        match &event {
-            Event::AboutToWait => {
-                state.about_to_wait();
-            },
-            Event::WindowEvent { event, window_id } if *window_id == state.window().id() => {
-                match event {
-                    WindowEvent::CloseRequested
-                    | WindowEvent::KeyboardInput {
-                        event:
-                            KeyEvent {
-                                logical_key:
-                                    winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape),
-                                ..
-                            },
-                        ..
-                    } => ewlt.exit(),
-                    WindowEvent::Resized(physical_size) => {
-                        state.resize(*physical_size);
-                    },
-                    WindowEvent::RedrawRequested => match state.render() {
-                        Ok(_) => {},
-                        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                            state.resize(state.size)
-                        },
-                        Err(wgpu::SurfaceError::OutOfMemory) => ewlt.exit(),
-                        Err(wgpu::SurfaceError::Timeout) => {},
-                    },
-                    other => {
-                        state.handle_event(other);
-                        window.request_redraw();
-                        return;
-                    },
-                };
-                state.handle_event(event);
-                window.request_redraw();
-            },
-            _ => {},
-        }
-    });
+    // eframe 0.34's native runner `take()`s `android_app` out of
+    // `NativeOptions` and feeds it to winit's
+    // `EventLoopBuilderExtAndroid::with_android_app` internally; it
+    // errors with "NativeOptions is missing required android_app" if
+    // this is left `None`. Setting `event_loop_builder` ourselves to
+    // do the same call is not equivalent — the runner does not skip
+    // its own check when we provide one.
+    log::info!("launch_android: populating NativeOptions.android_app");
+    // AndroidApp is internally Arc-backed, so cloning it just bumps
+    // a refcount. We give one clone to NativeOptions (eframe moves
+    // it into winit) and keep another in App so we can query
+    // `content_rect()` / `native_window()` every frame for safe-area
+    // insets — NativeActivity won't honor `fitsSystemWindows`, so we
+    // have to compute the inset ourselves.
+    let android_app_for_app = android_app.clone();
+    let native_options = eframe::NativeOptions {
+        android_app: Some(android_app),
+        renderer: eframe::Renderer::Wgpu,
+        ..Default::default()
+    };
+
+    galileo_egui::InitBuilder::new(map)
+        .with_handlers([handler])
+        .with_logging(false)
+        .with_native_options(native_options)
+        .with_app_builder(move |map_state, _cc| {
+            Box::new(App {
+                map_state,
+                ui_state,
+                last_pointer_position,
+                pending_center,
+                repaint,
+                android_app: android_app_for_app,
+            })
+        })
+        .init()
 }
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::wasm_bindgen;
-
-#[cfg(target_arch = "wasm32")]
-pub async fn set_up() -> (Window, EventLoop<()>) {
-    let event_loop = EventLoop::new().unwrap();
-    let window = WindowBuilder::new().build(&event_loop).unwrap();
-    let window = window;
-
-    web_sys::window()
-        .and_then(|win| win.document())
-        .and_then(|doc| {
-            let dst = doc.get_element_by_id("map")?;
-            let canvas = web_sys::Element::from(window.canvas()?);
-            dst.append_child(&canvas).ok()?;
-
-            Some(())
-        })
-        .expect("Couldn't create canvas");
-
-    let web_window = web_sys::window().unwrap();
-    let scale = web_window.device_pixel_ratio();
-
-    let _ = window.request_inner_size(PhysicalSize::new(
-        web_window.inner_width().unwrap().as_f64().unwrap() * scale,
-        web_window.inner_height().unwrap().as_f64().unwrap() * scale,
-    ));
-
-    sleep(10).await;
-
-    (window, event_loop)
-}
-
-#[cfg(target_arch = "wasm32")]
-async fn sleep(duration: i32) {
-    let mut cb = |resolve: js_sys::Function, _reject: js_sys::Function| {
-        web_sys::window()
-            .unwrap()
-            .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, duration)
-            .unwrap();
-    };
-
-    let p = js_sys::Promise::new(&mut cb);
-
-    wasm_bindgen_futures::JsFuture::from(p).await.unwrap();
-}
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(start)]
@@ -203,7 +218,11 @@ pub async fn init() {
         api_proxy_url: option_env!("KAYAKNAV_API_PROXY_URL")
             .map(str::to_string)
             .unwrap_or_else(|| Config::default().api_proxy_url),
+        // On wasm, `with_file_cache_checked` is a no-op — the value is
+        // ignored. The default is kept so construction is infallible.
+        ..Config::default()
     };
-    let (window, event_loop) = set_up().await;
-    run(window, event_loop, config).await;
+
+    let bundle = setup::build(config).await.expect("failed to set up app");
+    let _ = launch(bundle);
 }

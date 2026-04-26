@@ -1,0 +1,40 @@
+[package]
+name = "noaa_tides"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+description = "Offline tidal height and current predictions from NOAA harmonic constants, with a download-and-cache client for tidesandcurrents.noaa.gov."
+repository = "https://github.com/avrutin/kayaknav"
+keywords = ["tides", "currents", "noaa", "harmonic", "prediction"]
+categories = ["science"]
+
+[dependencies]
+anyhow = "1.0"
+bitcode = { version = "0.6", features = ["serde"] }
+chrono = "0.4"
+dirs = "5.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ruzstd = { version = "0.7", default-features = false, features = ["std"] }
+tracing = "0.1"
+urlencoding = "2.1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+bpaf = { version = "0.9", features = ["derive"] }
+env_logger = "0.11"
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio = { version = "1.38", features = ["fs", "sync", "rt-multi-thread", "macros"] }
+zstd = "0.13"
+
+[dev-dependencies]
+criterion = "0.5"
+tokio = { version = "1.38", features = ["full"] }
+
+[[bench]]
+name = "predictor"
+harness = false
+
+[[bench]]
+name = "event_detection"
+harness = false
